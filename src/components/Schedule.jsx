@@ -21,7 +21,7 @@ export default function Schedule() {
   // Weekend check function
   const isWeekend = () => {
     const day = new Date().getDay();
-    return day === 0  // 0 is Sunday, 6 is Saturday
+    return day === 1  // 0 is Sunday, 6 is Saturday
   };
 
   // Mövcud state-lər
@@ -39,20 +39,38 @@ export default function Schedule() {
   const [notification, setNotification] = useState({ title: '', body: '' });
   const [showNotification, setShowNotification] = useState(false);
 
-  // Bildiriş icazələrini və istifadəçi məlumatlarını yoxlayırıq
+  // İstifadəçi məlumatlarını və bildiriş statusunu yoxlayırıq
   useEffect(() => {
     // LocalStorage-dən istifadəçi məlumatlarını alırıq
     const savedUser = localStorage.getItem('scheduleAppUser');
     if (savedUser) {
       const user = JSON.parse(savedUser);
-      setUserEmail(user.email);
-      setUserName(user.name);
-  
-      // Avtomatik bildiriş icazəsini istəmək
-      requestAndRegisterNotifications(user.email, user.name);
+      setUserEmail(user.email || '');
+      setUserName(user.name || '');
+      
+      // Email varsa bildirişləri aktiv hesab edirik
+      if (user.email) {
+        setNotificationsEnabled(true);
+        console.log('Notifications enabled for email:', user.email);
+        
+        // Serverdə qeydiyyatı yeniləyirik - lakin əvvəlcə device token alırıq
+        requestNotificationPermission()
+          .then(token => {
+            registerUserWithEmailAndToken(user.email, user.name, token);
+          })
+          .catch(err => {
+            // Token ala bilməsək də, yalnız email ilə qeydiyyat edirik
+            registerUserWithEmailAndToken(user.email, user.name, null);
+            console.warn('Could not get notification token, using email only:', err);
+          });
+      } else {
+        setNotificationsEnabled(false);
+        setShowUserForm(true);
+      }
     } else {
       // İstifadəçi qeydiyyatdan keçməyibsə, formu göstəririk
       setShowUserForm(true);
+      setNotificationsEnabled(false);
     }
   
     // İlkin həftə tipini təyin edirik
@@ -63,10 +81,8 @@ export default function Schedule() {
       setCurrentWeekType(determineCurrentWeek());
     }, 1000 * 60 * 60 * 12); // 12 saatdan bir
   
-    // Ön planda olarkən gələn bildirişləri dinləyirik
-    let unsubscribe = null;
-  
-    onMessageListener()
+    // Ön planda olarkən bildirişləri dinləyirik (Firebase üçün)
+    const unsubscribeFn = onMessageListener()
       .then((payload) => {
         setNotification({
           title: payload.notification.title,
@@ -78,16 +94,46 @@ export default function Schedule() {
         setTimeout(() => {
           setShowNotification(false);
         }, 5000);
+        
+        return () => {}; // dummy unsubscribe
       })
-      .catch((err) => console.error("Failed to listen for messages:", err));
+      .catch((err) => {
+        console.error("Failed to listen for messages:", err);
+        return () => {};
+      });
   
     return () => {
       clearInterval(checkInterval);
-      if (typeof unsubscribe === "function") {
-        unsubscribe();
+      if (typeof unsubscribeFn === "function") {
+        unsubscribeFn();
       }
     };
   }, []);
+  
+  // İstifadəçini email və token ilə qeydiyyat edir
+  const registerUserWithEmailAndToken = async (email, name, deviceToken) => {
+    if (!email) return;
+    
+    try {
+      // İstifadəçini serverə qeydiyyata alırıq
+      await userService.registerUser({
+        name: name || 'Tələbə',
+        email: email,
+        deviceToken: deviceToken // token olmasa da null olaraq göndəririk
+      });
+      
+      // İstifadəçi məlumatlarını yadda saxlayırıq
+      localStorage.setItem('scheduleAppUser', JSON.stringify({
+        name: name || 'Tələbə',
+        email: email
+      }));
+      
+      console.log('User registered for notifications:', email);
+    } catch (error) {
+      console.error('Error registering user:', error);
+    }
+  };
+
   // Schedule data fetch effect
   useEffect(() => {
     const fetchScheduleData = async () => {
@@ -121,34 +167,8 @@ export default function Schedule() {
     fetchScheduleData();
   }, []);
 
-  // Bildiriş icazəsini istəmək və istifadəçini qeydiyyata almaq
-  const requestAndRegisterNotifications = async (email, name) => {
-    try {
-      const token = await requestNotificationPermission();
-      
-      if (token) {
-        // İstifadəçini serverə qeydiyyata alırıq
-        await userService.registerUser({
-          name: name || 'Tələbə',
-          email: email,
-          deviceToken: token
-        });
-        
-        setNotificationsEnabled(true);
-        
-        // İstifadəçi məlumatlarını yadda saxlayırıq
-        localStorage.setItem('scheduleAppUser', JSON.stringify({
-          name: name || 'Tələbə',
-          email: email
-        }));
-      }
-    } catch (error) {
-      console.error('Error registering for notifications:', error);
-    }
-  };
-
   // İstifadəçi qeydiyyatını təsdiqləmək
-  const handleSubmitUserForm = (e) => {
+  const handleSubmitUserForm = async (e) => {
     e.preventDefault();
     
     if (!userEmail) {
@@ -156,24 +176,43 @@ export default function Schedule() {
       return;
     }
     
-    requestAndRegisterNotifications(userEmail, userName);
-    setShowUserForm(false);
+    try {
+      // Əvvəlcə Firebase token almağa çalışırıq (browser bildirişləri üçün)
+      let deviceToken = null;
+      try {
+        deviceToken = await requestNotificationPermission();
+      } catch (err) {
+        console.warn('Could not get notification permission:', err);
+        // Token ala bilməsək də davam edirik - email yetərlidir
+      }
+      
+      // İstifadəçini qeydiyyat edirik
+      await registerUserWithEmailAndToken(userEmail, userName, deviceToken);
+      
+      // Bildirişləri aktiv edirik
+      setNotificationsEnabled(true);
+      setShowUserForm(false);
+      
+      alert('Bildirişlər uğurla aktivləşdirildi! Dərs cədvəli haqqında bildirişlər email vasitəsilə göndəriləcək.');
+    } catch (error) {
+      console.error('Error registering for notifications:', error);
+      alert('Bildirişləri aktivləşdirərkən xəta baş verdi. Zəhmət olmasa yenidən cəhd edin.');
+    }
   };
 
   // Bildirişləri aktivləşdirmək üçün düymə tıklanması
   const enableNotifications = () => {
     if (!notificationsEnabled) {
-      if (!userEmail) {
-        setShowUserForm(true);
-      } else {
-        requestAndRegisterNotifications(userEmail, userName);
-      }
+      setShowUserForm(true);
+    } else {
+      // Bildirişlər artıq aktivdir, istifadəçiyə bildiririk
+      alert(`Bildirişlər ${userEmail} email ünvanı üçün artıq aktivdir.`);
     }
   };
 
   // Day selector buttons
   const getDayButtons = () => {
-    const days = ['Bazar ertəsi', 'Çərşənbə axşamı', 'Çərşənbə', 'Cümə axşamı', 'Cümə', 'Şənbə'];
+    const days = ['Bazar ertəsi', 'Çərşənbə axşamı', 'Çərşənbə', 'Cümə axşamı', 'Cümə', 'Şənbə', 'Bazar'];
     
     return (
       <div className="flex flex-wrap justify-center gap-2 mb-6">
@@ -317,7 +356,10 @@ export default function Schedule() {
             onClick={enableNotifications}
             className={`px-4 py-2 rounded-md ${notificationsEnabled ? 'bg-green-600 text-white' : 'bg-yellow-500 text-white'}`}
           >
-            {notificationsEnabled ? 'Bildirişlər Aktivdir' : 'Bildirişləri Aktivləşdir'}
+            {notificationsEnabled ? 
+              `Bildirişlər Aktivdir (${userEmail})` : 
+              'Bildirişləri Aktivləşdir'
+            }
           </button>
         </div>
       </div>
@@ -348,9 +390,9 @@ export default function Schedule() {
         <h3 className="font-bold text-lg mb-2">Bildirişlər Haqqında</h3>
         <p>Bildirişləri aktivləşdirdiyiniz halda:</p>
         <ul className="list-disc ml-5 mt-2">
-          <li>Hər gün axşam saat 20:00-da növbəti günün dərs cədvəli haqqında xatırlatma alacaqsınız.</li>
-          <li>Hər dərsdən 15 dəqiqə əvvəl bildiriş gələcək.</li>
-          <li>Bildirişlər brauzer açıq olmadıqda belə çatacaq.</li>
+          <li>Hər gün axşam saat 23:51-də növbəti günün dərs cədvəli haqqında email alacaqsınız.</li>
+          <li>Hər dərsdən 15 dəqiqə əvvəl bildiriş email vasitəsilə göndəriləcək.</li>
+          <li>Bildirişlər almaq üçün tətbiqi açıq saxlamağa ehtiyac yoxdur.</li>
         </ul>
       </div>
       
