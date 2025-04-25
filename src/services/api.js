@@ -2,8 +2,8 @@
 import axios from 'axios';
 
 
-const BASE_URL = 'http://localhost:5000/api';
-// const BASE_URL = 'https://scheduleserver-42qj.onrender.com/api/'; // Serverin IP ünvanı ilə dəyişdirin
+// const BASE_URL = 'http://localhost:5000/api';
+const BASE_URL = 'https://scheduleserver-42qj.onrender.com/api/'; // Serverin IP ünvanı ilə dəyişdirin
 
 
 // Axios instance yaradaq
